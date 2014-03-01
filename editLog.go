@@ -134,26 +134,43 @@ func (e *editLog) getHistory() (historyMap map[string]string, err error) {
 }
 
 func (e *editLog) startBackup() (err error) {
-    log.Info("Starting a backup task")
-    tasks, err := e.makeTasks()
+    log.Info("Starting backup tasks")
+    tasks, redos, err := e.makeTasks()
     if err != nil {
+        log.Error("Error making tasklists")
         return
     }
-    log.Infof("%d file(s) to download", len(tasks))
-    ctSucceeded, ctFailed := 0, 0
+
+    //New tasks
+    log.Infof("##### %d file(s) to download #####", len(tasks))
+    ctNewSucceeded, ctNewFailed := 0, 0
     for _, keyWithTime := range tasks {
-        err = e.doTask(keyWithTime)
+        err = e.doTask(keyWithTime, 0)
         if err != nil {
-            ctFailed += 1
+            ctNewFailed += 1
         } else {
-            ctSucceeded += 1
+            ctNewSucceeded += 1
         }
     }
-    log.Infof("Task ended with %d succeeded, %d failed ", ctSucceeded, ctFailed)
+    log.Infof("##### Tasks ended with %d succeeded, %d failed #####", ctNewSucceeded, ctNewFailed)
+
+    //Redos
+    log.Infof("##### %d file(s) to redo #####", len(redos))
+    ctRedoSucceeded, ctRedoFailed := 0, 0
+    for keyWithTime, start := range redos {
+        err = e.doTask(keyWithTime, start)
+        if err != nil {
+            ctRedoFailed += 1
+        } else {
+            ctRedoSucceeded += 1
+        }
+    }
+    log.Infof("##### Redos ended with %d succeeded, %d failed #####", ctRedoSucceeded, ctRedoFailed)
+
     return nil
 }
 
-func (e *editLog) makeTasks() (taskList []string, err error) {
+func (e *editLog) makeTasks() (taskList []string, redoMap map[string]int64, err error) {
     keysMap, err := e.getKeys()
     if err != nil {
         return
@@ -162,16 +179,34 @@ func (e *editLog) makeTasks() (taskList []string, err error) {
     if err != nil {
         return
     }
+    redoMap = make(map[string]int64)
     for key, ts := range keysMap {
         keyWithTime := fmt.Sprintf("%s:%s", key, ts)
-        if _, ok := historyMap[keyWithTime]; !ok {
+        if detail, ok := historyMap[keyWithTime]; !ok {
             taskList = append(taskList, keyWithTime)
+        } else {
+            splitedDetail := strings.Split(detail, " ")
+            if len(splitedDetail) != 4 {
+                text := fmt.Sprintf("Error spliting history detail: %s", detail)
+                log.Debug(text)
+                continue
+            }
+            downloaded, err1 := strconv.Atoi(splitedDetail[2])
+            fullSzie, err2 := strconv.Atoi(splitedDetail[3])
+            if err1 != nil || err2 != nil {
+                text := fmt.Sprintf("Error converting detail to int: %s", detail)
+                log.Debug(text)
+                continue
+            }
+            if downloaded < fullSzie {
+                redoMap[keyWithTime] = int64(downloaded)
+            }
         }
     }
     return
 }
 
-func (e *editLog) doTask(keyWithTime string) (err error) {
+func (e *editLog) doTask(keyWithTime string, start int64) (err error) {
     splited := strings.Split(keyWithTime, ":")
     if len(splited) != 2 {
         text := fmt.Sprintf("Error spliting key: %s", keyWithTime)
@@ -186,13 +221,10 @@ func (e *editLog) doTask(keyWithTime string) (err error) {
         log.Errorf("Error unescaping %s", key)
     }
     log.Infof("Downloading %s", entry)
-    code, downloaded, fullSize, modTime, etag, err := e.download(unescapedKey)
+    _, downloaded, fullSize, modTime, etag, err := e.download(unescapedKey, start)
     //todo retry and resume
-    if code == 404 {
-        log.Debugf("File %s not found", entry)
-    }
     if err != nil {
-        log.Errorf("Failed downloading %s: %s", entry, err)
+        log.Errorf("Failed downloading %s : %s", entry, err)
         return
     }
     log.Infof("Succeeded downloading %s", entry)
@@ -204,12 +236,16 @@ func (e *editLog) doTask(keyWithTime string) (err error) {
     return
 }
 
-func (e *editLog) download(key string) (code int, downloaded, fullSize, modTime int64, etag string, err error) {
+func (e *editLog) download(key string, start int64) (code int, downloaded, fullSize, modTime int64, etag string, err error) {
     downloaded = -1
     baseUrl := e.makeBaseUrl(e.escape(key))
     fUrl := e.makeFullUrl(baseUrl)
     client := &http.Client{}
     req, err := http.NewRequest("GET", fUrl, nil)
+    header := http.Header{}
+    header.Set("Accept-Encoding", "identity")
+    header.Set("Range", fmt.Sprintf("bytes=%d-", start))
+    req.Header = header
     req.Close = true
     if err != nil {
         return
@@ -220,25 +256,36 @@ func (e *editLog) download(key string) (code int, downloaded, fullSize, modTime 
         return
     }
     defer resp.Body.Close()
+    reqId := resp.Header.Get("X-Reqid")
     code = resp.StatusCode
+    log.Debugf("ReqId: %s", reqId)
+    log.Debugf("Code: %d", code)
     if code/100 != 2 {
-        msg := fmt.Sprintf("Get Error: %s Code %d", baseUrl, code)
-        log.Debug(msg)
+        msg := fmt.Sprintf("Code: %d", code)
         err = errors.New(msg)
         return
     }
-    size, _ := strconv.Atoi(resp.Header.Get("Content-Length"))
-    fullSize = int64(size)
+    size, err := strconv.Atoi(resp.Header.Get("Content-Length"))
+    if err != nil {
+        msg := "No Content-Length in response header"
+        err = errors.New(msg)
+        return
+    }
+    fullSize = int64(size) + start
     etag = resp.Header.Get("Etag")
-    reqId := resp.Header.Get("X-Reqid")
-    log.Debugf("Response Reqid: %s", reqId)
-    downloaded, modTime, err = e.save(key, resp.Body)
-    //checkSize := true
+    if start > 0 {
+        downloaded, modTime, err = e.append(key, resp.Body)
+    } else {
+        downloaded, modTime, err = e.save(key, resp.Body)
+    }
+    if downloaded < fullSize {
+        err = io.ErrUnexpectedEOF
+    }
     //checkEtag := true
     return
 }
 
-func (e *editLog) save(key string, r io.Reader) (written, modTime int64, err error) {
+func (e *editLog) save(key string, r io.Reader) (downloaded, modTime int64, err error) {
     if key == "" {
         key = "_empty"
     }
@@ -255,16 +302,48 @@ func (e *editLog) save(key string, r io.Reader) (written, modTime int64, err err
         return
     }
     defer f.Close()
-    written, err = io.Copy(f, r)
-    if err != nil {
+    _, err = io.Copy(f, r)
+    if err != nil && err != io.ErrUnexpectedEOF {
         return
     }
-    fi, err := os.Stat(fPath)
+    fi, err := f.Stat()
     if err != nil {
         log.Errorf("Error stating file: %s", fPath)
         return
     }
     modTime = fi.ModTime().UnixNano()
+    downloaded = fi.Size()
+    return
+}
+
+func (e *editLog) append(key string, r io.Reader) (downloaded, modTime int64, err error) {
+    if key == "" {
+        key = "_empty"
+    }
+    fPath := path.Join(e.dataDir, key)
+    fDir := path.Dir(fPath)
+    err = os.MkdirAll(fDir, 0700)
+    if err != nil {
+        log.Errorf("Error making folder: %s", fDir)
+        return
+    }
+    f, err := os.OpenFile(fPath, os.O_RDWR|os.O_APPEND, 0660)
+    if err != nil {
+        log.Errorf("Error opening file: %s", fPath)
+        return
+    }
+    defer f.Close()
+    _, err = io.Copy(f, r)
+    if err != nil && err != io.ErrUnexpectedEOF {
+        return
+    }
+    fi, err := f.Stat()
+    if err != nil {
+        log.Errorf("Error stating file: %s", fPath)
+        return
+    }
+    modTime = fi.ModTime().UnixNano()
+    downloaded = fi.Size()
     return
 }
 
@@ -302,6 +381,8 @@ func NewEditLog(confPath string) (e *editLog, err error) {
         log.Error("Error decode config content")
         return
     }
+    text := fmt.Sprintf("\n### Config information ###\nBucket: %s;\nDomain: %s\nBaseDir: %s\nAccessKey: %s\nSecret Key: %s\n", conf.Bucket, conf.Domain, conf.BaseDir, strings.Repeat("*", len(conf.AccessKey)), strings.Repeat("*", len(conf.SecretKey)))
+    log.Info(text)
     if conf.Bucket == "" || conf.Domain == "" || conf.BaseDir == "" || conf.AccessKey == "" || conf.SecretKey == "" {
         text := "Error not enough parameters"
         log.Error(text)
@@ -329,13 +410,15 @@ func (s *Server) PutKeyHandler(w http.ResponseWriter, req *http.Request) {
     key := req.Form.Get("key")
     if key == "" {
         log.Error("No key to put")
+        w.WriteHeader(497)
         return
     }
     err := s.el.putKey(key)
     if err != nil {
-        log.Errorf("Error put key : %s", key)
+        log.Errorf("Error with the key : %s", key)
+        w.WriteHeader(498)
     }
-    log.Infof("Success put key : %s", key)
+    log.Infof("Success with the key : %s", key)
     return
 }
 
@@ -344,19 +427,40 @@ var confPath = flag.String("c", "", "-conf <path to config file>")
 var port = flag.Int("s", -1, "-s <port> , start a simplet server")
 var put = flag.String("p", "", "-p <key> , put a key to log")
 var backup = flag.Bool("b", false, "-b , start a backup task")
+var verbose = flag.Bool("v", false, "-v , verbose model")
 
 //main
 func useage() {
-    text := `
-Usage: backup -c <path to config file> {-s <port> | -p <key> | -b }
+    text := `使用方法: backup -c <path to config file> {-s <port> | -p <key> | -b }
+-s <port> : 启动一个监听 <port> 端口的简易服务器，
+            通过请求 http://localhost:port/?key=somekey 来新增文件记录;
+-p <key>  : 新增一个文件记录
+-b        : 开始备份
+-v        : 详情模式
+#####
+config 格式: 
+{
+    "bucket": "",
+    "domain": "",
+    "baseDir": "",
+    "accessKey": "",
+    "secretKey": ""
+}
+
     `
     fmt.Print(text)
 }
 
 func main() {
-    log.SetOutputLevel(log.Linfo)
-    log.SetFlags(log.Llevel | log.Lshortfile | log.LstdFlags)
+    flag.Usage = useage
     flag.Parse()
+
+    logLevel := log.Linfo
+    if *verbose {
+        logLevel = log.Ldebug
+    }
+    log.SetOutputLevel(logLevel)
+    log.SetFlags(log.Llevel | log.Lshortfile | log.LstdFlags)
 
     if *confPath == "" {
         useage()
@@ -371,7 +475,7 @@ func main() {
     }
 
     if *port >= 0 {
-        log.Info("Start a put server")
+        log.Infof("Start a put server for bucket: %s", el.Bucket)
         ser := NewServer(el)
         mux := http.NewServeMux()
 
