@@ -25,6 +25,7 @@ type Config struct {
     BaseDir   string
     AccessKey string
     SecretKey string
+    IPs       []string
 }
 
 type editLog struct {
@@ -381,7 +382,8 @@ func NewEditLog(confPath string) (e *editLog, err error) {
         log.Error("Error decode config content")
         return
     }
-    text := fmt.Sprintf("\n### Config information ###\nBucket: %s;\nDomain: %s\nBaseDir: %s\nAccessKey: %s\nSecret Key: %s\n", conf.Bucket, conf.Domain, conf.BaseDir, strings.Repeat("*", len(conf.AccessKey)), strings.Repeat("*", len(conf.SecretKey)))
+    text := fmt.Sprintf("\n### Config information ###\nBucket: %s;\nDomain: %s\nBaseDir: %s\nAccessKey: %s\nSecret Key: %s\n",
+        conf.Bucket, conf.Domain, conf.BaseDir, strings.Repeat("*", len(conf.AccessKey)), strings.Repeat("*", len(conf.SecretKey)))
     log.Info(text)
     if conf.Bucket == "" || conf.Domain == "" || conf.BaseDir == "" || conf.AccessKey == "" || conf.SecretKey == "" {
         text := "Error not enough parameters"
@@ -406,6 +408,15 @@ func NewServer(el *editLog) Server {
 }
 
 func (s *Server) PutKeyHandler(w http.ResponseWriter, req *http.Request) {
+    if len(s.el.IPs) != 0 {
+        remoteIp := strings.Split(req.RemoteAddr, ":")[0]
+        allowed := checkIp(remoteIp, s.el.IPs)
+        if !allowed {
+            log.Errorf("IP %s is not allowed", remoteIp)
+            w.WriteHeader(496)
+            return
+        }
+    }
     req.ParseForm()
     key := req.Form.Get("key")
     if key == "" {
@@ -422,6 +433,15 @@ func (s *Server) PutKeyHandler(w http.ResponseWriter, req *http.Request) {
     return
 }
 
+func checkIp(ip string, ipList []string) bool {
+    for _, v := range ipList {
+        if v == ip {
+            return true
+        }
+    }
+    return false
+}
+
 //flag
 var confPath = flag.String("c", "", "-conf <path to config file>")
 var port = flag.Int("s", -1, "-s <port> , start a simplet server")
@@ -435,7 +455,7 @@ func useage() {
 -s <port> : 启动一个监听 <port> 端口的简易服务器，
             通过请求 http://localhost:port/?key=somekey 来新增文件记录;
 -p <key>  : 新增一个文件记录
--b        : 开始备份
+-b  v      : 开始备份
 -v        : 详情模式
 #####
 config 格式: 
