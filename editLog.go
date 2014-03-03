@@ -30,9 +30,10 @@ type Config struct {
 
 type editLog struct {
     *Config
-    keysLog    string
-    historyLog string
-    dataDir    string
+    keysLog     string
+    historyLog  string
+    dataDir     string
+    backupCount int64
 }
 
 func (e *editLog) init() (err error) {
@@ -141,12 +142,16 @@ func (e *editLog) startBackup() (err error) {
         log.Error("Error making tasklists")
         return
     }
+    go e.doBackup(tasks, redos)
+    return nil
+}
 
+func (e *editLog) doBackup(tasks []string, redos map[string]int64) {
     //New tasks
     log.Infof("##### %d file(s) to download #####", len(tasks))
     ctNewSucceeded, ctNewFailed := 0, 0
     for _, keyWithTime := range tasks {
-        err = e.doTask(keyWithTime, 0)
+        err := e.doTask(keyWithTime, 0)
         if err != nil {
             ctNewFailed += 1
         } else {
@@ -159,7 +164,7 @@ func (e *editLog) startBackup() (err error) {
     log.Infof("##### %d file(s) to redo #####", len(redos))
     ctRedoSucceeded, ctRedoFailed := 0, 0
     for keyWithTime, start := range redos {
-        err = e.doTask(keyWithTime, start)
+        err := e.doTask(keyWithTime, start)
         if err != nil {
             ctRedoFailed += 1
         } else {
@@ -168,7 +173,6 @@ func (e *editLog) startBackup() (err error) {
     }
     log.Infof("##### Redos ended with %d succeeded, %d failed #####", ctRedoSucceeded, ctRedoFailed)
 
-    return nil
 }
 
 func (e *editLog) makeTasks() (taskList []string, redoMap map[string]int64, err error) {
@@ -407,13 +411,13 @@ func NewServer(el *editLog) Server {
     return Server{el}
 }
 
-func (s *Server) PutKeyHandler(w http.ResponseWriter, req *http.Request) {
+func (s *Server) PutKeyHandler(rw http.ResponseWriter, req *http.Request) {
     if len(s.el.IPs) != 0 {
         remoteIp := strings.Split(req.RemoteAddr, ":")[0]
         allowed := checkIp(remoteIp, s.el.IPs)
         if !allowed {
             log.Errorf("IP %s is not allowed", remoteIp)
-            w.WriteHeader(496)
+            rw.WriteHeader(496)
             return
         }
     }
@@ -421,15 +425,35 @@ func (s *Server) PutKeyHandler(w http.ResponseWriter, req *http.Request) {
     key := req.Form.Get("key")
     if key == "" {
         log.Error("No key to put")
-        w.WriteHeader(497)
+        rw.WriteHeader(497)
         return
     }
     err := s.el.putKey(key)
     if err != nil {
         log.Errorf("Error with the key : %s", key)
-        w.WriteHeader(498)
+        rw.WriteHeader(498)
+        return
     }
     log.Infof("Success with the key : %s", key)
+    return
+}
+
+func (s *Server) BackupHandler(rw http.ResponseWriter, req *http.Request) {
+    if len(s.el.IPs) != 0 {
+        remoteIp := strings.Split(req.RemoteAddr, ":")[0]
+        allowed := checkIp(remoteIp, s.el.IPs)
+        if !allowed {
+            log.Errorf("IP %s is not allowed", remoteIp)
+            rw.WriteHeader(496)
+            return
+        }
+    }
+    err := s.el.startBackup()
+    if err != nil {
+        log.Error("Error starting backup")
+        rw.WriteHeader(495)
+        return
+    }
     return
 }
 
@@ -500,8 +524,11 @@ func main() {
         ser := NewServer(el)
         mux := http.NewServeMux()
 
-        mux.HandleFunc("/addkey", func(w http.ResponseWriter, req *http.Request) {
-            ser.PutKeyHandler(w, req)
+        mux.HandleFunc("/addkey", func(rw http.ResponseWriter, req *http.Request) {
+            ser.PutKeyHandler(rw, req)
+        })
+        mux.HandleFunc("/backup", func(rw http.ResponseWriter, req *http.Request) {
+            ser.BackupHandler(rw, req)
         })
         http.ListenAndServe(fmt.Sprintf(":%d", *port), mux)
         os.Exit(0)
