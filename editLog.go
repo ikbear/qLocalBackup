@@ -453,7 +453,7 @@ var verbose = flag.Bool("v", false, "-v , verbose model")
 func useage() {
     text := `使用方法: backup -c <path to config file> {-s <port> | -p <key> | -b }
 -s <port> : 启动一个监听 <port> 端口的简易服务器，
-            通过请求 http://localhost:port/key?key=somekey 来新增文件记录;
+            通过请求 http://localhost:port/addkey?key=somekey 来新增文件记录;
 -p <key>  : 新增一个文件记录
 -b  v      : 开始备份
 -v        : 详情模式
@@ -500,7 +500,7 @@ func main() {
         ser := NewServer(el)
         mux := http.NewServeMux()
 
-        mux.HandleFunc("/key", func(w http.ResponseWriter, req *http.Request) {
+        mux.HandleFunc("/addkey", func(w http.ResponseWriter, req *http.Request) {
             ser.PutKeyHandler(w, req)
         })
         http.ListenAndServe(fmt.Sprintf(":%d", *port), mux)
