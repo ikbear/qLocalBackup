@@ -16,7 +16,7 @@ qiniu local Backup
 #####  
 config 格式:   
 {  
-    "ips": "",  
+    "ips": [],  
     "bucket": "",  
     "domain": "",  
     "baseDir": "",  

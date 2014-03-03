@@ -460,6 +460,7 @@ func useage() {
 #####
 config 格式: 
 {
+    "ips": [],
     "bucket": "",
     "domain": "",
     "baseDir": "",
