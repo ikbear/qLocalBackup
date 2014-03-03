@@ -16,6 +16,7 @@ import (
     "path"
     "strconv"
     "strings"
+    "sync"
     "time"
 )
 
@@ -34,6 +35,7 @@ type editLog struct {
     historyLog  string
     dataDir     string
     backupCount int64
+    lock        *sync.Mutex
 }
 
 func (e *editLog) init() (err error) {
@@ -147,6 +149,8 @@ func (e *editLog) startBackup() (err error) {
 }
 
 func (e *editLog) doBackup(tasks []string, redos map[string]int64) {
+    e.lock.Lock()
+    defer e.lock.Unlock()
     //New tasks
     log.Infof("##### %d file(s) to download #####", len(tasks))
     ctNewSucceeded, ctNewFailed := 0, 0
@@ -395,8 +399,10 @@ func NewEditLog(confPath string) (e *editLog, err error) {
         err = errors.New(text)
         return
     }
+    lock := &sync.Mutex{}
     e = &editLog{
         Config: conf,
+        lock:   lock,
     }
     err = e.init()
     return
